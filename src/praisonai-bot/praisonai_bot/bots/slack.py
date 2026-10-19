@@ -686,6 +686,7 @@ class SlackBot(OutboundResilienceMixin, ChatCommandMixin, MessageHookMixin):
                 explicit=bool(bot_tag) and bot_tag in text,
                 reply_to_bot=bool(self._bot_user)
                 and event.get("parent_user_id") == self._bot_user.user_id,
+                is_command=text.lstrip().startswith("/"),
             ).admit
             if should_respond and bot_tag:
                 text = text.replace(bot_tag, "").strip()
@@ -843,6 +844,16 @@ class SlackBot(OutboundResilienceMixin, ChatCommandMixin, MessageHookMixin):
             text = (decision.get("content") or "").strip()
             if self._bot_user:
                 text = text.replace(f"<@{self._bot_user.user_id}>", "").strip()
+
+            # Same group-policy gate as handle_message (#5908) so
+            # ``command_only`` is not bypassed by a plain @mention.
+            if not self.group_admission(
+                chat_type=event.get("channel_type", "") or "channel",
+                chat_id=str(event.get("channel", "")),
+                explicit=True,
+                is_command=text.startswith("/"),
+            ).admit:
+                return
 
             if self._agent:
                 try:
