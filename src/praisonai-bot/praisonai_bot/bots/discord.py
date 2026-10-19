@@ -451,11 +451,19 @@ class DiscordBot(OutboundResilienceMixin, ChatCommandMixin, MessageHookMixin):
                 # Slack reference adapter so a misspelled or not-yet-implemented
                 # command reaches the agent instead of vanishing (Issue #4318).
             
-            should_respond = False
-            if message.guild is None:
-                should_respond = True
-            elif self._client.user.mentioned_in(message) or not self.config.mention_required:
-                should_respond = True
+            # Group-policy gate via the shared core admission primitive
+            # (Issue #5908): honours ``group_policy`` and treats a reply to the
+            # bot as an implicit mention, matching Telegram/Slack.
+            _ref = getattr(getattr(message, "reference", None), "resolved", None)
+            _ref_author = getattr(_ref, "author", None)
+            should_respond = self.group_admission(
+                chat_type="dm" if message.guild is None else "group",
+                chat_id=str(message.channel.id),
+                explicit=self._client.user.mentioned_in(message),
+                reply_to_bot=_ref_author is not None
+                and getattr(_ref_author, "id", None) == self._client.user.id,
+                is_command=bot_message.message_type == MessageType.COMMAND,
+            ).admit
             
             if should_respond:
                 for handler in self._message_handlers:

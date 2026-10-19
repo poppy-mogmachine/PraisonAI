@@ -671,19 +671,24 @@ class SlackBot(OutboundResilienceMixin, ChatCommandMixin, MessageHookMixin):
                 except Exception as e:
                     logger.error(f"Message handler error: {e}")
             
-            should_respond = False
             # Dispatch the (possibly redacted) content from the inbound gate so
             # a MESSAGE_RECEIVED hook rewrite reaches the agent, not the raw text.
             text = decision.get("content") or bot_message.content or ""
             channel_type = event.get("channel_type", "")
             
-            if channel_type == "im":
-                should_respond = True
-            elif self._bot_user and f"<@{self._bot_user.user_id}>" in text:
-                should_respond = True
-                text = text.replace(f"<@{self._bot_user.user_id}>", "").strip()
-            elif not self.config.mention_required:
-                should_respond = True
+            # Group-policy gate via the shared core admission primitive
+            # (Issue #5908): honours ``group_policy`` and treats a threaded
+            # reply to a bot message as an implicit mention, matching Telegram.
+            bot_tag = f"<@{self._bot_user.user_id}>" if self._bot_user else ""
+            should_respond = self.group_admission(
+                chat_type=channel_type or "channel",
+                chat_id=str(event.get("channel", "")),
+                explicit=bool(bot_tag) and bot_tag in text,
+                reply_to_bot=bool(self._bot_user)
+                and event.get("parent_user_id") == self._bot_user.user_id,
+            ).admit
+            if should_respond and bot_tag:
+                text = text.replace(bot_tag, "").strip()
             
             if should_respond and self._agent:
                 channel_id = event.get("channel", "")

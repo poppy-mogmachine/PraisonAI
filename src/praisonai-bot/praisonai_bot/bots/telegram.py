@@ -2676,58 +2676,29 @@ async def process_inbound_telegram_message(
     
     # 3. Group policy enforcement
     if message.channel and message.channel.channel_type not in ("dm", "private"):
-        # This is a group/channel message, check group policies
-        group_policy = getattr(bot.config, 'group_policy', 'mention_only')
-        mention_required = getattr(bot.config, 'mention_required', True)
-        
-        if group_policy == "command_only":
-            if message.message_type != MessageType.COMMAND:
-                logger.debug(f"Message dropped: non-command in command_only group {channel_id}")
-                return None
-        elif group_policy in ("mention_only", "observe"):
-            # Check if bot was mentioned in the message
-            bot_username = bot._bot_user.username.lower() if bot._bot_user and bot._bot_user.username else ""
-            mention_handle = f"@{bot_username}" if bot_username else ""
-            explicit_mention = bool(
-                mention_handle and mention_handle in message.content.lower()
-            )
+        # This is a group/channel message: resolve the group-policy gate via
+        # the shared core admission primitive (Issue #5908) so Telegram,
+        # Discord and Slack apply identical semantics.
+        bot_username = bot._bot_user.username.lower() if bot._bot_user and bot._bot_user.username else ""
+        mention_handle = f"@{bot_username}" if bot_username else ""
+        decision = bot.group_admission(
+            chat_type=message.channel.channel_type,
+            chat_id=channel_id,
+            explicit=bool(mention_handle and mention_handle in message.content.lower()),
             # Issue #5029: a reply to the bot's own message counts as an
             # implicit mention, so continuing a conversation by tapping "Reply"
             # is answered without re-typing @bot.
-            reply_to_bot = _is_reply_to_bot(update, bot)
-            bot_mentioned = (
-                explicit_mention
-                or reply_to_bot
-                or message.message_type == MessageType.COMMAND  # Commands are always allowed
-            )
-
-            if not bot_mentioned:
-                # Issue #3380: under ``observe`` an unmentioned group message is
-                # recorded into the session transcript as passive context (no
-                # agent run) so the bot has memory of the conversation when it is
-                # next addressed. ``mention_only`` still drops it outright.
-                if group_policy == "observe":
-                    _record_passive_group_message(bot, message)
-                    logger.debug(f"Message observed (no run) in group {channel_id}")
-                else:
-                    logger.debug(f"Message dropped: bot not mentioned in group {channel_id}")
-                return None
-        elif group_policy == "respond_all":
-            # Allow all group messages
-            pass
-        elif mention_required:
-            # Fallback for backward compatibility when group_policy is not set
-            bot_username = bot._bot_user.username.lower() if bot._bot_user and bot._bot_user.username else ""
-            mention_handle = f"@{bot_username}" if bot_username else ""
-            bot_mentioned = (
-                bool(mention_handle and mention_handle in message.content.lower())
-                or _is_reply_to_bot(update, bot)  # Issue #5029: reply-to-bot is implicit
-                or message.message_type == MessageType.COMMAND  # Commands are always allowed
-            )
-
-            if not bot_mentioned:
-                logger.debug(f"Message dropped: bot not mentioned in group {channel_id}")
-                return None
+            reply_to_bot=_is_reply_to_bot(update, bot),
+            is_command=message.message_type == MessageType.COMMAND,
+        )
+        if not decision.admit:
+            # Issue #3380: under ``observe`` an unmentioned group message is
+            # recorded into the session transcript as passive context (no
+            # agent run) so the bot has memory of the conversation when it is
+            # next addressed.
+            if decision.observe:
+                _record_passive_group_message(bot, message)
+            return None
     
     # Bot-to-bot loop guard (#5062). A bot-authored message is dropped unless
     # the channel opted into ``allow_bots``; once opted in, the BotLoopGuard

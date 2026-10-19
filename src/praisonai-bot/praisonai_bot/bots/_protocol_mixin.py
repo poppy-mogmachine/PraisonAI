@@ -301,6 +301,46 @@ class MessageHookMixin:
             logger.debug("BotLoopGuard.observe failed (allowing): %s", e)
             return True
 
+    def group_admission(
+        self,
+        *,
+        chat_type: str,
+        chat_id: str = "",
+        explicit: bool = False,
+        reply_to_bot: bool = False,
+        is_command: bool = False,
+    ) -> Any:
+        """Resolve the group-policy gate via the core admission primitive (#5908).
+
+        Every adapter feeds the mention facts it can observe from its native
+        payload and acts on the returned ``IngressDecision`` so ``group_policy``
+        and implicit mentions (reply-to-bot) behave identically across
+        transports. Allow-list/pairing stay in each adapter's existing pipeline.
+
+        ``mention_required=False`` under the default ``mention_only`` policy is
+        honoured as ``respond_all`` so standalone bots configured with the
+        older knob keep answering every group message.
+        """
+        from praisonaiagents.bots.admission import MentionFacts, resolve_ingress_admission
+
+        config = getattr(self, "config", None)
+        policy = getattr(config, "group_policy", None) or "mention_only"
+        if policy == "mention_only" and not getattr(config, "mention_required", True):
+            policy = "respond_all"
+        decision = resolve_ingress_admission(
+            chat_type=chat_type,
+            sender_id=None,
+            mention=MentionFacts(explicit=explicit, reply_to_bot=reply_to_bot),
+            is_command=is_command,
+            group_policy=policy,
+        )
+        if not decision.admit:
+            logger.debug(
+                "Ingress skipped: platform=%s chat=%s reason=%s",
+                getattr(self, "platform", "unknown"), chat_id, decision.reason_code,
+            )
+        return decision
+
     def _get_bot_loop_guard(self) -> Any:
         """Lazily build this adapter's ``BotLoopGuard`` from config (cached)."""
         guard = getattr(self, "_bot_loop_guard", None)
